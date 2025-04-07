@@ -1,0 +1,7 @@
+.nav-sidebar .nav-treeview {
+    padding: 0 0 0 20px !important;
+}
+
+.sidebar-mini.sidebar-collapse .nav-sidebar .nav-treeview {
+    padding: 0 0 0 0px !important;
+}

@@ -1,0 +1,1875 @@
+<?php
+
+namespace App\Http\Controllers\CareerAdministration\CareerTransition;
+
+use App\Models\CareerAdministration\CareerTransition\CareerTransition;
+use App\Models\Employee\EmployeeRequest\ApprovalTransaction;
+use App\Models\Organization\OrganizationStructure\JobPositionDetail;
+use App\Models\GeneralSetting\CompanySetting\Company;
+use App\Models\Employee\Employee\Employee;
+use App\Models\Setting\ResponsibilityUser\MasterUser;
+use App\Models\Setting\ResponsibilityUser\RelationCompanyUser;
+use App\Models\Employee\Employee\Education;
+use App\Models\Employee\Employee\Family;
+use App\Models\Employee\Employee\Experience;
+use App\Models\Employee\Employee\Bank;
+use App\Models\Employee\Employee\Insurance;
+use App\Models\Employee\Employee\EmployeeLeave;
+use App\Models\Employee\Employee\Document;
+use App\Models\Employee\Employee\Boarding;
+use App\Models\Setting\Responsibility\MasterMenu;
+use App\Models\Setting\Responsibility\Responsibility;
+use App\Models\Setting\ResponsibilityUser\MasterUserResponsibility;
+use App\Models\Integration\Bgen\Bgen;
+use App\Models\GeneralSetting\CompanySetting\HrConfigSettings;
+use App\Models\Curl;
+use App\Http\Controllers\Controller;
+use App\Http\Controllers\TimeAttendance\Attendance\AttendanceController;
+use App\Http\Controllers\EmailController;
+use Illuminate\Http\Request;
+use DataTables;
+use Validator;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
+
+class CareerTransitionController extends Controller {
+	
+	public function __construct()
+	{
+        $this->AttendanceController = new AttendanceController;
+        $this->EmailController = new EmailController;
+
+        $statusApiUpdateNik = 'production'; //optional ['staging', 'production']
+        if($statusApiUpdateNik == 'production'){
+            $apiIsActiveUser = curl::findApi('myborwita_user_update_is_active_production');
+        	$this->urlApiIsActiveUser = @$apiIsActiveUser->url;
+        	$this->usernameApiIsActiveUser = @$apiIsActiveUser->user;
+        	$this->passwordApiIsActiveUser = @$apiIsActiveUser->password;
+
+            $apiUpdateNikUser = curl::findApi('myborwita_user_update_nik_production');
+        	$this->urlApiUpdateNikUser = @$apiUpdateNikUser->url;
+        	$this->usernameApiUpdateNikUser = @$apiUpdateNikUser->user;
+        	$this->passwordApiUpdateNikUser = @$apiUpdateNikUser->password;
+        } 
+        else {
+        	$apiIsActiveUser = curl::findApi('myborwita_user_update_is_active_staging');
+        	$this->urlApiIsActiveUser = @$apiIsActiveUser->url;
+        	$this->usernameApiIsActiveUser = @$apiIsActiveUser->user;
+        	$this->passwordApiIsActiveUser = @$apiIsActiveUser->password;
+
+            $apiUpdateNikUser = curl::findApi('myborwita_user_update_nik_staging');
+        	$this->urlApiUpdateNikUser = @$apiUpdateNikUser->url;
+        	$this->usernameApiUpdateNikUser = @$apiUpdateNikUser->user;
+        	$this->passwordApiUpdateNikUser = @$apiUpdateNikUser->password;
+        }
+	}
+
+    public function index(Request $request) {
+        if ($request->ajax()) {
+			$data_access = Employee::get_access($request->id_url);
+			if($data_access != null){
+				foreach($data_access as $value){
+					$x[] = $value->id_branch;
+				}
+				$group_branch = implode(",", $x);
+			}
+			else{
+				$group_branch = null;
+			}
+			
+            $data = CareerTransition::getdata($group_branch);
+            return DataTables::of($data)
+                            ->addIndexColumn()
+                            ->addColumn('', function($data) {
+                                $a = '';
+                                return $a;
+                            })
+                            ->addColumn('attachment_custom', function($data){
+                            	$storagePath = '';
+                            	if(!is_null($data->attachment)){
+	                                if (Storage::exists('public/upload/career/'.$data->nik_employee.'/'.$data->attachment)) {
+										$storagePath = url('project/storage/app/public/upload/career').'/'.$data->nik_employee.'/'.$data->attachment;
+									} else {
+										if (Storage::exists('public/upload/career/'.$data->id_employee.'/'.$data->attachment)) {
+											$storagePath = url('project/storage/app/public/upload/career').'/'.$data->id_employee.'/'.$data->attachment;
+										}
+									}
+                            	}
+                                return $storagePath;
+                            })
+                            ->addColumn('action', function($data) {								
+                                $button = '<button type="button" name="submit" id="' . $data->id_career_transaction . '" class="submit_approve btn btn-info btn-sm" title="Submit"><span class="fas fa-paper-plane"></span></button> ';
+								$button .= '<button type="button" name="edit" id="' . $data->id_career_transaction . '" class="edit btn btn-primary btn-sm" title="Edit"><span class="fas fa-edit"></span></button> ';                          
+								$button .= '<button type="button" name="cancel" id="' . $data->id_career_transaction . '" class="cancel btn btn-danger btn-sm" title="Cancel"><span class="fa fa-close"></span></button>';
+								if($data->id_recommendation_header != null){
+									$onclickPdf = "get_pdf(".$data->id_recommendation_header.")";
+									$button .= ' <button type="button" target="_blank" name="print" onclick="'.$onclickPdf.'" class="print btn btn-success btn-sm btn-print" title="Print"><span class="fa fa-file-pdf"></span></button> ';
+								}
+                                return $button;
+                            })
+                            ->rawColumns(['action'])
+                            ->make(true);
+        }
+        return view('career_administration.career_transition.career_transition_request.index');
+    }
+
+	protected function validateCareer(Request $request) {
+		if($request->code_transaction_type == 'Rehire_Employee'){
+			$request->validate([
+			'reference_number' => 'unique:hr_career_transaction', Rule::unique('hr_career_transaction')->where(function ($query) {
+                        return $query->where('id_company', session('id_company'));
+                    }),
+		
+            'id_employee' => 'required',
+            'effective_date' => 'required',
+            'attachment' => 'max:2016',
+                ], [],
+                [
+                    'id_employee' => 'Employee',
+                    'reference_number' => 'Reference Number',
+                    'enable_approval' => 'Enable Approval',
+                    'id_approval' => 'Approval',
+                    'effective_date' => 'Effective Date',
+			]);
+		}
+		else{
+			 $request->validate([
+			'reference_number' => 'unique:hr_career_transaction', Rule::unique('hr_career_transaction')->where(function ($query) {
+                        return $query->where('id_company', session('id_company'));
+                    }),		
+            'id_employee' => 'required',
+            'enable_approval' => 'required',
+            'id_approval' => 'required',
+            'effective_date' => 'required',
+            'attachment' => 'max:2016',
+                ], [],
+                [
+                    'id_employee' => 'Employee',
+                    'reference_number' => 'Reference Number',
+                    'enable_approval' => 'Enable Approval',
+                    'id_approval' => 'Approval',
+                    'effective_date' => 'Effective Date',
+			]);
+		}
+	}
+   
+	protected function validateCareerUpdate(Request $request) {
+		if($request->code_transaction_type == 'Rehire_Employee'){
+			$request->validate([
+			'id_employee' => 'required',			
+            'effective_date' => 'required',
+            'attachment' => 'max:2016',
+                ], [],
+                [
+					'id_employee' => 'Employee',
+                    'effective_date' => 'Effective Date',
+			]);
+		}
+		else{
+			$request->validate([
+			'id_employee' => 'required',
+			'enable_approval' => 'required',
+			'id_approval' => 'required',
+            'effective_date' => 'required',
+            'attachment' => 'max:2016',
+                ], [],
+                [
+					'id_employee' => 'Employee',
+					'enable_approval' => 'Enable Approval',
+					'id_approval' => 'Approval',
+                    'effective_date' => 'Effective Date',
+			]);
+		}
+	}
+	protected function save(Request $request) {
+		$this->validateCareer($request);	
+		try{
+			DB::beginTransaction();
+			if($request->attachment != ""){
+				$getEmployee = DB::table('hr_employee')->select('nik_employee')->where('id_employee', $request->id_employee)->first();
+				$nikEmployee = $getEmployee->nik_employee;
+
+				$rnd = rand(1000,9999).strtotime(date('Y-m-d'));
+				$image = $rnd."-".$request->id_employee.".".$request->attachment->getClientOriginalExtension();
+				$dir = Storage::makeDirectory('public/upload/career/'.$nikEmployee, 0775, true, true);
+				$storageimage = Storage::putFileAs('public/upload/career/'.$nikEmployee, $request->attachment,$image);
+				// $dir = Storage::makeDirectory('public/upload/career/'.$request->id_employee,0775, true, true);
+				// $storageimage = Storage::putFileAs('public/upload/career/'.$request->id_employee,$request->attachment,$image);
+			}
+			else{
+				$image = NULL;
+			}
+			$kode = CareerTransition::getkode();
+		//	dd($kode);
+			$approved = CareerTransition::approved();
+			$form_data = array(
+				'reference_number' => $kode,
+			//    'transaction_number' => $request->transaction_number,
+				'id_employee' => $request->id_employee,
+				'id_employee2' => $request->id_employee2,
+				'id_transition_category' => $request->id_transition_category,
+				'id_transaction_type' => $request->id_transaction_type,
+				'id_old_employment_status' => $request->id_old_employment_status,
+				'id_employment_status' => $request->id_employment_status,
+				'id_old_position_detail' => $request->id_old_position_detail,
+				'id_position_detail' => $request->id_position_detail,
+				'id_position_routing' => $request->id_position_routing,
+				'id_job_grade' => $request->id_job_grade,
+				'id_job_status' => $request->id_job_status,
+				'id_location' => $request->id_location,
+				'remark' => $request->remark,				
+				'enable_approval' => isset($request->enable_approval) == "on" ? 1 : 0,
+				'id_approval' => $request->id_approval,
+				'id_approval_status' => ($request->id_approval != null) ? $request->id_approval_status : $approved->id_general_data,
+				'id_company_destination' => $request->id_company_destination,
+				'effective_date' => $request->effective_date,
+				'expired_date' => $request->expired_date,            
+				'attachment' => $image,
+				'id_recommendation_header' => $request->id_recommendation_header,
+				'status' => $request->status,
+				'id_company' => session('id_company'),
+				'created_by' => session('id_user'),
+			);
+
+		if($request->id_position_detail == NULL){
+			$id_pos_detail = $request->id_old_position_detail;
+		}	
+		else if($request->id_position_detail != NULL){
+			$id_pos_detail = $request->id_position_detail;
+		}
+	
+		$get_effective = CareerTransition::get_effective_date($id_pos_detail);
+		$get_not_request = CareerTransition::get_not_request($request->id_employee);
+		$get_request_termination = CareerTransition::get_request_termination($request->id_employee);
+		$get_request = CareerTransition::get_request($request->id_employee);
+		if($get_not_request){
+			return response()->json(['status' => 'false_date', 'message' => 'Career Request tidak bisa dibuat, Karena masih ada Career Request dari karyawan tersebut yang belum selesai (Career Request masih berjalan).']);
+		}
+		else if($request->effective_date <= @$get_request[0]->effective_date){
+			return response()->json(['status' => 'false_date', 'message' => 'Effective Date yang dipilih lebih kecil dari Effective Date Career Request yang sebelumnya. (Ganti Effective Date yang lebih besar)']);
+		}
+		
+		if($get_effective){
+			if(@$get_effective[0]->code != "Termination"){
+				if(@$get_effective[0]->id_position_detail == $request->id_position_detail){
+					if(!(@$get_effective[0]->concurent == 'Concurent' or @$get_effective[0]->concurent == 'Temporary Assignment')){
+						return response()->json(['status' => 'false_date', 'message' => 'Position yang dipilih telah digunakan karyawan lain. (Buat Position Baru)']);
+					}
+				}
+			/*	else if($request->effective_date < @$get_effective[0]->effective_date){
+					return response()->json(['status' => 'false_date', 'message' => 'Effective Date yang dipilih masih digunakan di Career. (Ganti Effective Date yang lebih besar atau Buat Position Baru)']);
+				}
+			*/
+			}
+			/*
+			else if($request->effective_date <= @$get_effective[0]->effective_date){
+				return response()->json(['status' => 'false_date', 'message' => 'Effective Date yang dipilih masih digunakan di Career. (Ganti Effective Date yang lebih besar atau Buat Position Baru)']);
+			}
+			*/
+			
+		}
+		if($request->code_transaction_type != 'Rehire_Employee'){
+			if(!empty($get_request_termination)){
+					return response()->json(['status' => 'false_date', 'message' => 'Career Request tidak bisa dibuat, Karena ada Proses Termination dari karyawan tersebut.']);
+				}
+		}
+		if($request->code_transaction_type == 'Termination'){
+			if(!empty($get_request_termination)){
+				return response()->json(['status' => 'false_date', 'message' => 'Career Request Termination tidak bisa dibuat, Karena masih ada Proses Termination dari karyawan tersebut (Double Termination).']);
+			}
+			if($request->effective_date < $request->request_resign_date){
+				return response()->json(['status' => 'false_date', 'message' => 'Career Request Termination tidak bisa dibuat, Karena Effective Date (Tanggal Terakhir Bekerja) Lebih Kecil Dari Request Resign Date (Tanggal Pengajuan Resign).']);
+			}
+			$form_data['id_employment_status'] = $request->id_old_employment_status;
+			$form_data['id_terminate_reason'] = $request->id_terminate_reason;
+			$form_data['request_resign_date'] = $request->request_resign_date;
+			$form_data['resign_category'] = $request->resign_category;
+			$form_data['expired_date'] = NULL;
+			$form_data['id_position_detail'] = NULL;
+			$form_data['id_position_routing'] = NULL;
+			$form_data['id_job_grade'] = NULL;
+			$form_data['id_job_status'] = NULL;
+			$form_data['id_location'] = NULL;
+		}
+		else if($request->code_transaction_type != 'Termination' && $request->code_transaction_type != 'Rehire_Employee'){
+			if($request->id_position_detail == NULL){
+				$form_data['id_position_detail'] = $request->id_old_position_detail;
+			}
+			if($request->code_transaction_type == 'Entity_Movement'){
+				$form_data['id_new_shift_group'] = $request->id_new_shift_group;
+				$form_data['id_new_timezone'] = $request->id_new_timezone;
+			}
+		}
+		
+		$trans_type = CareerTransition::get_transaction_type($request->id_transaction_type);
+		if($trans_type->text == "Employment Status Changes" || $trans_type->text == "Pass Orientation" || $trans_type->text == "Pass RPK"){
+			$form_data['id_position_detail'] = $request->id_old_position_detail;
+		}	
+		$career = CareerTransition::create($form_data);
+		if($request->code_transaction_type != 'Rehire_Employee'){
+			$app = ApprovalTransaction::get_approval($request->id_approval);
+		//	dd($app);
+			if($app[0]->hierarchy_type == "Organization"){
+				$approve = ApprovalTransaction::get_app_org($request->id_employee,session('id_company'));
+			}
+			else if($app[0]->hierarchy_type == "Combine"){
+				$approve = ApprovalTransaction::get_app_combine($request->id_employee,session('id_company'),$request->id_approval);
+			}
+			else if($app[0]->hierarchy_type == "Custom"){
+				$approve = ApprovalTransaction::get_app_custom_career($request->id_employee,session('id_company'),$request->id_approval);
+			}
+			foreach ($approve as $key => $value) {
+					$source[$key]['id_source_transaction'] = $career->id_career_transaction;
+					$source[$key]['source_transaction_type'] = $app[0]->code;
+					$source[$key]['id_approval'] = $app[0]->id_approval;
+					$source[$key]['id_approval_detail'] = isset($value->id_approval_detail) ? $value->id_approval_detail: null;
+					$source[$key]['id_approval_status'] = $app[0]->id_approval_status;
+					$source[$key]['id_approval_mode'] = $value->id_approval_mode;
+					$source[$key]['sequence'] = $value->sequence;
+					$source[$key]['id_position_detail'] = $value->id_position_detail;
+					$source[$key]['id_employee_approval'] = $value->id_employee_approval;
+					$source[$key]['id_user'] = $value->id_user;
+			}
+			
+			foreach ($source as $key => $value) {
+				$create_apptrans = array(
+						'id_source_transaction' => $value['id_source_transaction'],
+						'source_transaction_type' => $value['source_transaction_type'],
+						'id_approval' => $value['id_approval'],
+						'id_approval_detail' => $value['id_approval_detail'],
+						'sequence' => $value['sequence'],
+						'id_employee_approval' => $value['id_employee_approval'],
+						'id_approval_status' => $value['id_approval_status'],
+						'id_approval_mode' => $value['id_approval_mode'],
+						'id_position_detail' => $value['id_position_detail'],
+						'id_company' => session('id_company'),
+						'created_by' => session('id_user'),
+				);
+				
+				ApprovalTransaction::create($create_apptrans);
+				/*
+				if(count($source) > 1 && $value['id_user'] != session('id_user')){
+					ApprovalTransaction::create($create_apptrans);
+				}
+				else{
+					if(count($source) == 1 && $value['id_user'] == session('id_user')){
+						$approved = CareerTransition::approved();
+						CareerTransition::where('id_career_transaction', $career->id_career_transaction)->update(array(
+							'id_approval_status' => $approved->id_general_data,			
+						));
+					}
+					else{
+						ApprovalTransaction::create($create_apptrans);
+					}
+				}
+				*/
+			}
+		}
+		else if($request->code_transaction_type == 'Rehire_Employee'){
+			$this->transition();
+		}
+			DB::commit();
+			return response()->json(['status' => 'true',  'data'=>$career->id_career_transaction, 'message' => 'Career Transition Request Saved Successfully !!']);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error($e);
+			return response()->json(['status' => 'false',  'data'=>null, 'message' => 'Cannot Save Career Transition Request !! [' . $e->getMessage() . ']']);           
+        }
+    }
+
+    public function update(Request $request) {
+		 $this->validateCareerUpdate($request);
+	try{
+			DB::beginTransaction();
+			$form_data = array(
+				//	'transaction_number' => $request->transaction_number,
+					'id_employee' => $request->id_employee,
+					'id_employee2' => $request->id_employee2,
+					'id_transition_category' => $request->id_transition_category,
+					'id_transaction_type' => $request->id_transaction_type,
+					'id_old_employment_status' => $request->id_old_employment_status,
+					'id_employment_status' => $request->id_employment_status,
+					'id_old_position_detail' => $request->id_old_position_detail,
+					'id_position_detail' => $request->id_position_detail,
+					'id_position_routing' => $request->id_position_routing,
+					'id_job_grade' => $request->id_job_grade,
+					'id_job_status' => $request->id_job_status,
+					'id_location' => $request->id_location,
+					'remark' => $request->remark,
+				//	'id_terminate_reason' => $request->id_terminate_reason,
+				//	'resign_category' => $request->resign_category,
+					'enable_approval' => isset($request->enable_approval) == "on" ? 1 : 0,
+					'id_approval' => $request->id_approval,
+					'id_approval_status' => $request->id_approval_status,
+					'id_company_destination' => $request->id_company_destination,
+					'effective_date' => $request->effective_date,
+					'expired_date' => $request->expired_date,            
+					'status' => $request->status,
+					'id_recommendation_header' => $request->id_recommendation_header,
+					'id_company' => session('id_company'),
+					'updated_by' => session('id_user'),
+				);
+		if($request->attachment != ""){
+			$getEmployee = DB::table('hr_employee')->select('nik_employee')->where('id_employee', $request->id_employee)->first();
+			$nikEmployee = $getEmployee->nik_employee;
+				
+			$rnd = rand(1000,9999).strtotime(date('Y-m-d'));
+			$image = $rnd."-".$request->id_employee.".".$request->attachment->getClientOriginalExtension();
+			$dir = Storage::makeDirectory('public/upload/career/'.$nikEmployee,0775, true, true);
+			$storageimage = Storage::putFileAs('public/upload/career/'.$nikEmployee,$request->attachment,$image);
+			$form_data['attachment'] = $image;							
+		}
+		if($request->code_transaction_type == 'Termination'){
+			$form_data['id_employment_status'] = $request->id_old_employment_status;
+			$form_data['id_terminate_reason'] = $request->id_terminate_reason;
+			$form_data['request_resign_date'] = $request->request_resign_date;
+			$form_data['resign_category'] = $request->resign_category;
+			$form_data['expired_date'] = NULL;
+			$form_data['id_position_detail'] = NULL;
+			$form_data['id_position_routing'] = NULL;
+			$form_data['id_job_grade'] = NULL;
+			$form_data['id_job_status'] = NULL;
+			$form_data['id_location'] = NULL;
+		}
+		if($request->code_transaction_type == 'Entity_Movement'){
+			$form_data['id_new_shift_group'] = $request->id_new_shift_group;
+			$form_data['id_new_timezone'] = $request->id_new_timezone;
+		}
+		
+		// $get_effective = CareerTransition::get_effective_date($request->id_position_detail);
+		$get_request = CareerTransition::get_request($request->id_employee);
+		
+		if($request->effective_date <= @$get_request[0]->effective_date){
+			return response()->json(['status' => 'false_date', 'message' => 'Effective Date yang dipilih lebih kecil dari Effective Date Career Request yang sebelumnya. (Ganti Effective Date yang lebih besar)']);
+		}
+	/*	
+		if($get_effective){			
+			if(@$get_effective[0]->code != "Termination"){
+				if($request->effective_date < @$get_effective[0]->effective_date){
+					return response()->json(['status' => 'false_date', 'message' => 'Effective Date yang dipilih masih digunakan di Career. (Ganti Effective Date yang lebih besar atau Buat Position Baru)']);
+				}
+			}
+			else if($request->effective_date <= @$get_effective[0]->effective_date){
+				return response()->json(['status' => 'false_date', 'message' => 'Effective Date yang dipilih masih digunakan di Career. (Ganti Effective Date yang lebih besar atau Buat Position Baru)']);
+			}
+		}
+	*/
+		$trans_type = CareerTransition::get_transaction_type($request->id_transaction_type);
+		if($trans_type->text == "Employment Status Changes" || $trans_type->text == "Pass Orientation" || $trans_type->text == "Pass RPK"){
+			$form_data['id_position_detail'] = $request->id_old_position_detail;
+		}	
+
+		$career = CareerTransition::findOrFail($request->id_career_transaction)->update($form_data);
+			
+		/*	if(strtotime($career->effective_date) <= strtotime(date('Y-m-d'))){
+				JobPositionDetail::where('id_position_detail', $career->id_old_position_detail)->update(array(
+							'id_employee' => NULL,
+						));	
+				JobPositionDetail::where('id_position_detail', $career->id_position_detail)->update(array(
+					'id_employee' => $career->id_employee,
+				));	
+			}
+		*/
+		if($request->code_transaction_type != 'Rehire_Employee'){
+			$app = ApprovalTransaction::get_approval($request->id_approval);
+			$apptrans = ApprovalTransaction::where('id_source_transaction', $request->id_career_transaction)->where('source_transaction_type', 'Career_Request')->delete();
+		//	dd($app);
+			if($app[0]->hierarchy_type == "Organization"){
+				$approve = ApprovalTransaction::get_app_org($request->id_employee,session('id_company'));
+			}
+			else if($app[0]->hierarchy_type == "Combine"){
+				$approve = ApprovalTransaction::get_app_combine($request->id_employee,session('id_company'),$request->id_approval);
+			}
+			else if($app[0]->hierarchy_type == "Custom"){
+				$approve = ApprovalTransaction::get_app_custom_career($request->id_employee,session('id_company'),$request->id_approval);
+			}
+			foreach ($approve as $key => $value) {
+					$source[$key]['id_source_transaction'] =  $request->id_career_transaction;
+					$source[$key]['source_transaction_type'] = $app[0]->code;
+					$source[$key]['id_approval'] = $app[0]->id_approval;
+					$source[$key]['id_approval_detail'] = isset($value->id_approval_detail) ? $value->id_approval_detail: null;
+					$source[$key]['id_approval_status'] = $app[0]->id_approval_status;
+					$source[$key]['id_approval_mode'] = $value->id_approval_mode;
+					$source[$key]['sequence'] = $value->sequence;
+					$source[$key]['id_position_detail'] = $value->id_position_detail;
+					$source[$key]['id_employee_approval'] = $value->id_employee_approval;
+			}
+			foreach ($source as $key => $value) {
+				ApprovalTransaction::create(array(
+					'id_source_transaction' => $value['id_source_transaction'],
+					'source_transaction_type' => $value['source_transaction_type'],
+					'id_approval' => $value['id_approval'],
+					'id_approval_detail' => $value['id_approval_detail'],
+					'sequence' => $value['sequence'],
+					'id_employee_approval' => $value['id_employee_approval'],
+					'id_approval_status' => $value['id_approval_status'],
+					'id_approval_mode' => $value['id_approval_mode'],
+					'id_position_detail' => $value['id_position_detail'],
+					'id_company' => session('id_company'),
+					'created_by' => session('id_user'),
+				));
+			}
+		}
+			DB::commit();
+			return response()->json(['status' => 'true', 'data'=>$request->id_career_transaction,'message' => 'Career Transition Request Updated Successfully !!']);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error($e);
+			return response()->json(['status' => 'false', 'data'=>null, 'message' => 'Cannot Updated Career Transition Request !! [' . $e->getMessage() . ']']);           
+        }
+	
+    }
+
+    public function transition() {
+    	ini_set('max_execution_time', -1);
+    //	\Log::channel('scheduler')->info('Start Schedule : Employee Transition');
+		try{
+		//	DB::beginTransaction();
+			//variabel utk call API HRIS Mobile
+			$updateNikMobile = [];
+            $career = CareerTransition::transition_career();
+		//	$i = 0;
+		//	$form = [];	
+			$cekHrConfig = HrConfigSettings::where('id_company',session('id_company'))->first();
+			if(Schema::hasColumn('hr_config_settings', 'erp_integration')){
+				if($cekHrConfig){
+					$checkBgen = $cekHrConfig->erp_integration;				
+				}
+				else{
+					$checkBgen = false;
+				}
+			}
+			else{
+				$checkBgen = false;
+			}
+
+			foreach($career as $key=>$value){
+				$type = str_replace(' ','_',$value->type);
+				$dateplus = date('Y-m-d',strtotime("+1 day",strtotime($value->effective_date)));
+				if($dateplus <= date('Y-m-d') && $value->code == 'Approved' && $value->executed == 0 && $value->category == 'Termination'){
+					DB::beginTransaction();
+						$mp_old = JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->first();
+						if($value->id_employee == $mp_old->id_employee){
+							$up_emp = JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->update(array(
+								'id_employee' => null,
+							));	
+							$mp_emp = JobPositionDetail::where('id_employee', $value->id_employee)->where('secondary_position', true)->update(array(
+								'id_employee' => null,
+								'secondary_position' => false,
+							));	
+							if(!is_null($mp_old->id_employee2)){
+								$up_emp = JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->update(array(
+									'id_employee' => $mp_old->id_employee2,
+									'id_employee2' => NULL,
+								));	
+							}
+						}
+						
+					/*	
+						else{
+							$up_emp = JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->update(array(
+								'id_employee2' => null,
+							));
+						}
+					*/
+						$job_term = CareerTransition::get_last_position($value->id_old_position_detail);		
+						$car_resign = CareerTransition::get_type_reason($value->id_terminate_reason);
+						try{
+							$up_emp2 = Employee::where('id_employee', $value->id_employee)->update(array(
+								'last_position_routing' => @$job_term[0]->position_routing,
+								'last_department' => @$job_term[0]->department." (".@$job_term[0]->location.")",
+								'resign_date' => $value->effective_date,
+								'status' => 'I',
+								'additional_note' => $value->remark,							
+								'terminate_reason' => '('.$car_resign[0]->code.'-'.$value->resign_category.') '.$car_resign[0]->description,
+							));	
+						} catch (\Exception $e) {
+							$idError = $value->id_employee;
+							$titleError = 'Error Employee Transition : '.$value->category.'. Employee '.$idError;
+							$bodyError = ' cannot update [status=I] by id_employee ('.$idError.')';
+							\Log::error($titleError.$bodyError);
+
+							if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+						    	throw new \Exception($e->getMessage());    
+						    } else {
+						    	throw new \Exception($titleError);    
+						    }
+				        }
+						
+						$emp_user = Employee::where('id_employee', $value->id_employee)->first();
+						try{
+							$up_user = MasterUser::where('id_user', $emp_user->id_user)->update(array(
+								'status' => 'I',
+							));
+						} catch (\Exception $e) {
+							$idError = $emp_user->id_user;
+							$titleError = 'Error Empoloyee Transition : '.$value->category.'. User '.$idError;
+							$bodyError = ' cannot update [status=I] by id_user ('.$idError.')';
+							\Log::error($titleError.$bodyError);
+				            
+							if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+						    	throw new \Exception($e->getMessage());    
+						    } else {
+						    	throw new \Exception($titleError);    
+						    }        
+				        }
+						
+						if(!$up_emp || !$up_emp2 || !$up_user){
+							 throw new \Exception("This is an exception");
+						}
+						
+					/*	$getDept = CareerTransition::getDept($value->id_old_position_detail);
+						if($getDept->dept_code == "170_SAL"){
+							$bgenCareer = DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->first();
+							$bgenPrincipal = DB::table('relation_positiondetail_principal')->where('id_position_detail', $value->id_old_position_detail)->first();
+							$getPosition = JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->first();
+							if($checkBgen == true){
+								$bgenData = New Bgen();
+								$bgenData -> id_employee = $bgenCareer->id_employee;
+								$bgenData -> id_transition_category = $bgenCareer->id_transition_category;
+								$bgenData -> id_branch = $getPosition->id_branch;
+								$bgenData -> id_principal = $bgenPrincipal->id_principal;
+								$bgenData -> id_position_route_destinaton = $getPosition->id_position_routing;
+								$bgenData -> id_location_destination = $getPosition->id_location;
+								$bgenData -> status = 'I';
+								$bgenData -> id_company = $bgenCareer->id_company;
+								$bgenData -> created_by = $bgenCareer->created_by;																
+								$bgenData -> save();							
+							}						
+						}
+					*/					
+						DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->update(array(
+							'executed' => 1,				
+						));
+
+						//======== utk kebutuhan call API HRIS Mobile =======
+						$updateNikMobile[$emp_user->nik_employee][] = 'inactive'; //terminate
+						// ==================================================
+						DB::commit();
+				}
+				if($value->effective_date <= date('Y-m-d') && $value->code == 'Approved' && $value->executed == 0 && $value->category != 'Termination'){	
+					$job_emp = JobPositionDetail::where('id_position_detail',$value->id_position_detail)->first();
+					if($type == 'Concurent'){
+						DB::beginTransaction();
+						$job_con = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+							'secondary_position' => true,
+							'id_employee' => $value->id_employee,
+						));	
+						DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->update(array(
+							'executed' => 1,				
+						));
+						DB::commit();
+					}
+					if($type == 'New_Employee'){
+						DB::beginTransaction();
+						if($job_emp->secondary_position == true){
+							JobPositionDetail::where('id_position_detail',$value->id_position_detail)->update(array(
+								'id_employee' => $value->id_employee,
+								'secondary_position' => false,
+							));
+						}
+						else if(!is_null($job_emp->id_employee)){
+						$up_emp_new = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+								'id_employee2' => $value->id_employee,
+							));
+						}
+						else if(is_null($job_emp->id_employee)){
+							JobPositionDetail::where('id_position_detail',$value->id_position_detail)->update(array(
+								'id_employee' => $value->id_employee,
+							));
+						}	
+							
+						
+					/*	$req = new Request();
+						$req->id_employee = $value->id_employee;
+						$req->id_company = $value->id_company;
+						$this->AttendanceController->generateWorkdaysByEmployee($req);
+					*/
+						DB::select("select * from generateworkdaysnewemployee(?,?,?,?,?)",[$value->id_employee,$value->id_company,$value->effective_date,date('Y-m-d'),$value->created_by]);
+
+						$generateLock = DB::table(DB::raw("generate_lock_gps_location(".$value->id_employee.",".$value->id_company.",'".$value->effective_date."','".date('Y-m-d')."',".$value->created_by.")"))->select('*')->get();
+						
+					/*		
+						$generateLock = DB::statement("UPDATE hr_work_days hwd
+                        SET lock_gps_location = he.lock_gps_location                         
+                        FROM hr_employee he
+                        WHERE hwd.id_employee = he.id_employee
+                            AND hwd.id_company = he.id_company
+                            AND hwd.lock_gps_location <> he.lock_gps_location
+                            AND	current_dates >= coalesce('".$value->effective_date."',current_date)
+					        AND current_dates <= '".$value->effective_date."'::date + 30
+                            AND hwd.id_employee = coalesce(".$value->id_employee.", he.id_employee)
+                            AND hwd.id_company = coalesce(".$value->id_company.", he.id_company)");
+					*/
+					/*
+						$getDept = CareerTransition::getDept($value->id_position_detail);
+						if($getDept->dept_code == "170_SAL"){
+							$bgenCareer = DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->first();
+							$bgenMaster = DB::table('master_general_data')->where('id_company', $bgenCareer->id_company)->where('code','Sales_Code')->first();
+							$bgenPrincipal = DB::table('relation_positiondetail_principal')->where('id_position_detail', $value->id_position_detail)->first();
+							$bgenIdApproval = DB::table('hr_approval_header')->where('id_approval_doc_type', $bgenMaster->id_general_data)->where('id_company',$bgenCareer->id_company)->first();
+							$getPosition = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->first();
+							if($checkBgen == true){
+								$bgenData = New Bgen();
+								$bgenData -> id_employee = $bgenCareer->id_employee;
+								$bgenData -> id_transition_category = $bgenCareer->id_transition_category;
+								$bgenData -> id_branch = $getPosition->id_branch;
+								$bgenData -> id_principal = $bgenPrincipal->id_principal;
+								$bgenData -> id_position_route_destinaton = $getPosition->id_position_routing;
+								$bgenData -> id_location_destination = $getPosition->id_location;
+								$bgenData -> status = 'A';
+								$bgenData -> id_company = $bgenCareer->id_company;
+								$bgenData -> created_by = $bgenCareer->created_by;	
+								
+								$app = Bgen::get_approval($bgenIdApproval->id_approval);
+								$bgenData -> id_approval = $bgenIdApproval->id_approval;
+								$bgenData -> id_approval_status = $app[0]->id_approval_status;
+								$bgenData -> save();
+								
+								$appTrans = Bgen::get_approval_trans($bgenCareer->id_employee);						
+								$form_trans = array(
+									'id_source_transaction' => $bgenData->id_integration_sales_code,
+									'source_transaction_type' => $app[0]->code,
+									'id_approval' => $app[0]->id_approval,
+									'sequence' => $appTrans[0]->sequence,
+									'id_approval_mode' => $appTrans[0]->id_approval_mode,
+									'id_employee_approval' => $appTrans[0]->id_employee_approval,
+									'id_position_detail' => $appTrans[0]->id_detail_chief,
+									'id_approval_status' => $app[0]->id_approval_status,
+									'id_company' => $bgenCareer->id_company,
+									'created_by' => $bgenCareer->created_by,
+								 );
+							
+								$at = ApprovalTransaction::create($form_trans);
+							}						
+						}
+					*/
+						DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->update(array(
+							'executed' => 1,				
+						));
+						
+						// ======= utk kebutuhan call API HRIS Mobile =======
+						$getEmployeeById = DB::table('hr_employee')
+							->where('id_employee', $value->id_employee)->first();
+						$ktpEmployee = @$getEmployeeById->identification_number;
+						$getEmployeeByKtp = DB::table('hr_employee')
+							->where('identification_number', $ktpEmployee)->orderBy('id_employee', 'asc')
+							->get();
+						if($getEmployeeByKtp->count() > 1){
+							$allNik = $getEmployeeByKtp->pluck('nik_employee')->all();
+							$nikOld = $allNik[count($allNik)-2];
+							$lastNik = $allNik[count($allNik)-1];
+
+							if($nikOld != $lastNik){
+								$updateNikMobile[$nikOld][] = $lastNik; //change nik
+							}
+						}
+						// ==================================================
+						DB::commit();
+					}				
+					if($type == 'Rehire_Employee'){
+					//	$x = [];
+						DB::beginTransaction();
+						$emp_rehire = Employee::where('id_employee', $value->id_employee)->get()->makeHidden(['id_employee'])->toArray();
+						foreach($emp_rehire as $k=>$val){
+											
+							$val['join_date'] = $value->effective_date;
+							$val['expired_date'] = $value->expired_date;
+							$val['status'] = 'A';
+							$val['resign_date'] = null;
+							$val['additional_note'] = null;
+							$val['terminate_reason'] = null;
+							$val['last_department'] = null;
+							$val['last_position_routing'] = null;
+							
+							$val['id_employment_status'] = $value->id_employment_status;
+							$val['created_by'] = $value->created_by;
+
+							try{
+								$emp = Employee::create($val);
+							} catch (\Exception $e) {
+								$idError = $value->id_employee;
+								$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+								$bodyError = ' cannot create new employee ('.$idError.')';
+								\Log::error($titleError.$bodyError);
+					            
+								if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+							    	throw new \Exception($e->getMessage());    
+							    } else {
+							    	throw new \Exception($titleError);    
+							    }
+					        }
+
+						//	$x[] = $val;
+							
+							if($value->id_position_detail != null){	
+								if(!is_null($job_emp->id_employee)){
+									$up_emp_new = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+											'id_employee2' => $emp->id_employee,
+										));
+								}
+								else{
+									JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+										'id_employee' => $emp->id_employee,
+									));
+								}
+							}
+														
+							try{
+								MasterUser::where('id_user', $emp->id_user)->update(array(
+									'status' => 'A',
+								));
+							} catch (\Exception $e) {
+								$idError = $emp->id_user;
+								$titleError = 'Error Empoloyee Transition : '.$value->category.'. User '.$idError;
+								$bodyError = ' cannot update [status=A] by id_user ('.$idError.')';
+								\Log::error($titleError.$bodyError);
+					            
+								if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+							    	throw new \Exception($e->getMessage());    
+							    } else {
+							    	throw new \Exception($titleError);    
+							    }
+					        }
+							
+							CareerTransition::where('id_employee', $value->id_employee)->where('reference_number', $value->reference_number)->update(array(
+								'id_employee' => $emp->id_employee,			
+							));
+							
+						/*	$req = new Request();
+							$req->id_employee = $emp->id_employee;
+							$req->id_company = $emp->id_company;
+							dd($req);
+							$this->AttendanceController->generateWorkdaysByEmployee($req);
+							DB::select("select * from  GenerateMassLeave (?, ?, ?, ?)",[$emp->id_company,$emp->id_user,$emp->id_employee,date('Y-m-d')]);
+						*/
+							DB::select("select * from generateworkdaysnewemployee(?,?,?,?,?)",[$emp->id_employee,$emp->id_company,$emp->join_date,date('Y-m-d'),$emp->created_by]);
+							
+							$generateLock = DB::table(DB::raw("generate_lock_gps_location(".$emp->id_employee.",".$emp->id_company.",'".$emp->join_date."','".date('Y-m-d')."',".$emp->created_by.")"))->select('*')->get();
+						/*	
+							$generateLock = DB::statement("UPDATE hr_work_days hwd
+								SET lock_gps_location = he.lock_gps_location                         
+								FROM hr_employee he
+								WHERE hwd.id_employee = he.id_employee
+									AND hwd.id_company = he.id_company
+									AND hwd.lock_gps_location <> he.lock_gps_location
+									AND	current_dates >= coalesce('".$emp->join_date."',current_date)
+									AND current_dates <= '".$emp->join_date."'::date + 30
+									AND hwd.id_employee = coalesce(".$emp->id_employee.", he.id_employee)
+									AND hwd.id_company = coalesce(".$emp->id_company.", he.id_company)");
+						*/	
+							$emp_doc = Document::where('id_employee', $value->id_employee)->get()->makeHidden(['id_document_employee'])->toArray();
+							if($emp_doc){
+								foreach($emp_doc as $d=>$doc_val){
+									$doc_val['id_employee'] = $emp->id_employee;
+									try{
+										$copy_doc = Document::create($doc_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee document by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							$emp_bank = Bank::where('id_employee', $value->id_employee)->get()->makeHidden(['id_bank_employee'])->toArray();
+							if($emp_bank){
+								foreach($emp_bank as $d=>$bank_val){
+									$bank_val['id_employee'] = $emp->id_employee;
+									try{
+										$copy_bank = Bank::create($bank_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee bank by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							$emp_ins = Insurance::where('id_employee', $value->id_employee)->get()->makeHidden(['id_insurance_employee'])->toArray();
+							if($emp_ins){
+								foreach($emp_ins as $d=>$ins_val){
+									$ins_val['id_employee'] = $emp->id_employee;
+									try{
+										$copy_ins = Insurance::create($ins_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee insurance by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_edu = Education::where('id_employee', $value->id_employee)->get()->makeHidden(['id_education_employee'])->toArray();
+							if($emp_edu){
+								foreach($emp_edu as $d=>$edu_val){
+									$edu_val['id_employee'] = $emp->id_employee;
+									try{
+										$copy_edu = Education::create($edu_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee Education by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_fam = Family::where('id_employee', $value->id_employee)->get()->makeHidden(['id_family_employee'])->toArray();
+							if($emp_fam){
+								foreach($emp_fam as $d=>$fam_val){
+									$fam_val['id_employee'] = $emp->id_employee;
+									try{
+										$copy_fam = Family::create($fam_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee Family by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_ex = Experience::where('id_employee', $value->id_employee)->get()->makeHidden(['id_experience_employee'])->toArray();
+							if($emp_ex){
+								foreach($emp_ex as $d=>$ex_val){
+									$ex_val['id_employee'] = $emp->id_employee;
+									try{
+										$copy_ex = Experience::create($ex_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee Experience by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+						}		
+					/*
+						$getDept = CareerTransition::getDept($value->id_position_detail);
+						if($getDept->dept_code == "170_SAL"){
+							$bgenCareer = DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->first();
+							$bgenMaster = DB::table('master_general_data')->where('id_company', $bgenCareer->id_company)->where('code','Sales_Code')->first();
+							$bgenPrincipal = DB::table('relation_positiondetail_principal')->where('id_position_detail', $value->id_position_detail)->first();
+							$bgenIdApproval = DB::table('hr_approval_header')->where('id_approval_doc_type', $bgenMaster->id_general_data)->where('id_company',$bgenCareer->id_company)->first();
+							$getPosition = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->first();
+							if($checkBgen == true){
+								$bgenData = New Bgen();
+								$bgenData -> id_employee = $bgenCareer->id_employee;
+								$bgenData -> id_transition_category = $bgenCareer->id_transition_category;
+								$bgenData -> id_branch = $getPosition->id_branch;
+								$bgenData -> id_principal = $bgenPrincipal->id_principal;
+								$bgenData -> id_position_route_destinaton = $getPosition->id_position_routing;
+								$bgenData -> id_location_destination = $getPosition->id_location;
+								$bgenData -> status = 'A';
+								$bgenData -> id_company = $bgenCareer->id_company;
+								$bgenData -> created_by = $bgenCareer->created_by;	
+								
+								$app = Bgen::get_approval($bgenIdApproval->id_approval);
+								$bgenData -> id_approval = $bgenIdApproval->id_approval;
+								$bgenData -> id_approval_status = $app[0]->id_approval_status;
+								$bgenData -> save();
+								
+								$appTrans = Bgen::get_approval_trans($bgenCareer->id_employee);						
+								$form_trans = array(
+									'id_source_transaction' => $bgenData->id_integration_sales_code,
+									'source_transaction_type' => $app[0]->code,
+									'id_approval' => $app[0]->id_approval,
+									'sequence' => $appTrans[0]->sequence,
+									'id_approval_mode' => $appTrans[0]->id_approval_mode,
+									'id_employee_approval' => $appTrans[0]->id_employee_approval,
+									'id_position_detail' => $appTrans[0]->id_detail_chief,
+									'id_approval_status' => $app[0]->id_approval_status,
+									'id_company' => $bgenCareer->id_company,
+									'created_by' => $bgenCareer->created_by,
+								 );
+							
+								$at = ApprovalTransaction::create($form_trans);
+							}						
+						}
+					*/							
+						DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->update(array(
+							'executed' => 1,				
+						));
+						// ======= utk kebutuhan call API HRIS Mobile =======
+						$updateNikMobile[@$emp->nik_employee][] = 'active'; //rehire-join tanpa ganti nik
+						// ==================================================
+						DB::commit();
+					}					
+					if($value->category == 'Movement' && $type != 'Concurent' && $type != 'Temporary_Assignment'){	
+						DB::beginTransaction();
+						$emp_movement = Employee::where('id_employee', $value->id_employee)->get()->toArray();
+					//	dd($emp_movement);
+						foreach($emp_movement as $k=>$val){							
+								if($val['permanent_date'] == null){
+									if($type == 'Employment_Status_Changes'){
+										Employee::where('id_employee', $val['id_employee'])->update(array(
+											'id_employment_status' => $value->id_employment_status,
+											'permanent_date' => $value->effective_date,
+											'expired_date' => $value->expired_date,
+										));
+									}
+									else{
+										Employee::where('id_employee', $val['id_employee'])->update(array(
+											'id_employment_status' => $value->id_employment_status,
+											'expired_date' => $value->expired_date,
+										));
+									}
+								}
+								else{
+									Employee::where('id_employee', $val['id_employee'])->update(array(
+										'id_employment_status' => $value->id_employment_status,
+										'expired_date' => $value->expired_date,
+									));
+								}	
+						}
+						if($value->id_position_detail != NULL && $value->id_old_position_detail != $value->id_position_detail && $job_emp->secondary_position == false){
+								JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->where('id_employee',$value->id_employee)->update(array(
+									'id_employee' => NULL,
+								));	
+								
+							if(!is_null($job_emp->id_employee)){
+								JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+									'id_employee2' => $value->id_employee,
+								));
+							}
+							else if(is_null($job_emp->id_employee)){
+								JobPositionDetail::where('id_position_detail',$value->id_position_detail)->update(array(
+									'id_employee' => $value->id_employee,
+								));
+							}	
+
+							$job_emp_old = JobPositionDetail::where('id_position_detail',$value->id_old_position_detail)->first();							
+							if(is_null(@$job_emp_old->id_employee) && !is_null(@$job_emp_old->id_employee2)){		
+								JobPositionDetail::where('id_position_detail',$job_emp_old->id_position_detail)->update(array(
+									'id_employee' => $job_emp_old->id_employee2,
+									'id_employee2' => NULL,
+								));
+							}
+						}
+						else if($job_emp->secondary_position == true){
+							JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->where('id_employee',$value->id_employee)->update(array(
+									'id_employee' => NULL,
+								));	
+							JobPositionDetail::where('id_position_detail',$value->id_position_detail)->update(array(
+									'id_employee' => $value->id_employee,
+									'secondary_position' => false,
+								));
+						}
+					/*	
+						$getDept = CareerTransition::getDept($value->id_position_detail);
+						if($getDept->dept_code == "170_SAL"){
+							$bgenCareer = DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->first();
+							$bgenPrincipal = DB::table('relation_positiondetail_principal')->where('id_position_detail', $value->id_position_detail)->first();
+							$getPosition = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->first();
+							if($checkBgen == true){
+								$bgenData = New Bgen();
+								$bgenData -> id_employee = $bgenCareer->id_employee;
+								$bgenData -> id_transition_category = $bgenCareer->id_transition_category;
+								$bgenData -> id_branch = $getPosition->id_branch;
+								$bgenData -> id_principal = $bgenPrincipal->id_principal;
+								$bgenData -> id_position_route_destinaton = $getPosition->id_position_routing;
+								$bgenData -> id_location_destination = $getPosition->id_location;
+								$bgenData -> status = 'A';
+								$bgenData -> id_company = $bgenCareer->id_company;
+								$bgenData -> created_by = $bgenCareer->created_by;																
+								$bgenData -> save();							
+							}						
+						}
+					*/	
+						DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->update(array(
+							'executed' => 1,				
+						));
+						
+						DB::commit();
+					}							
+					if($type == 'Entity_Movement'){
+						DB::beginTransaction();
+					//	$x = [];
+						$empGetUser = Employee::where('id_employee', $value->id_employee)->where('status', 'A')->first();						
+						/* Get Master Leave Id */						
+						$getLeave = DB::select(DB::raw(
+							"SELECT mlh.leave_group_name FROM public.master_leave_header mlh WHERE mlh.id_company = ".$empGetUser->id_company." AND mlh.id_leave_header = ".$empGetUser->id_leave
+							) 
+						)[0];
+						$leave_group_name = $getLeave->leave_group_name;
+						
+						$valLeave = DB::select(DB::raw(
+							"SELECT mlh.id_leave_header FROM public.master_leave_header mlh WHERE mlh.id_company = ".$value->id_company_destination." 
+							AND mlh.leave_group_name = '".$leave_group_name."'"
+							) 
+						)[0];						
+						/*------------------------------*/
+						
+						/* Get Religion Id */						
+						$getReligion = DB::select( DB::raw(
+							"SELECT mgd.code FROM public.master_general_data mgd WHERE mgd.id_company = ".$empGetUser->id_company." AND mgd.id_general_data = ".$empGetUser->id_religion
+							) 
+						)[0];
+						$idReligion = $getReligion->code;
+
+						$valReligion = DB::select( DB::raw(
+							"SELECT mgd.id_general_data FROM public.master_general_data mgd WHERE mgd.id_company = ".$value->id_company_destination." 
+							AND mgd.code = '".$idReligion."'"
+							) 
+						)[0];								
+						/*------------------------------*/
+						
+						/* Get Vaccination Id */
+						if(!is_null($empGetUser->id_vaccination_status)){
+							$getVac = DB::select( DB::raw(
+								"SELECT mgd.code FROM public.master_general_data mgd WHERE mgd.id_company = ".$empGetUser->id_company." AND mgd.id_general_data = ".$empGetUser->id_vaccination_status
+								) 
+							)[0];
+							$idVac = $getVac->code;	
+
+							$valVac = DB::select( DB::raw(
+								"SELECT mgd.id_general_data FROM public.master_general_data mgd WHERE mgd.id_company = ".$value->id_company_destination." 
+								AND mgd.code = '".$idVac."'"
+								) 
+							)[0];	
+							$fixValVac = $valVac->id_general_data;
+						}
+						else{
+							$fixValVac = NULL;
+						}										
+						/*------------------------------*/
+						$job_term = CareerTransition::get_last_position($value->id_old_position_detail);
+						$getMu = MasterUser::where('id_user', $empGetUser->id_user)->first();
+						Employee::where('id_employee', $value->id_employee)->where('status', 'A')->update(array(
+							'status' => 'I',
+							'last_position_routing' => @$job_term[0]->position_routing,
+							'last_department' => @$job_term[0]->department." (".@$job_term[0]->location.")",
+							'terminate_reason' => "Entity Movement",
+						));
+						MasterUser::where('id_user', $empGetUser->id_user)->update(array(
+							'status' => 'I',
+						));
+						
+						$emp_entity = Employee::where('id_employee', $value->id_employee)->get()->makeHidden(['id_employee'])->toArray();						
+						foreach($emp_entity as $k=>$val){							
+							$nik = Employee::getcode($value->id_company_destination);				
+							$val['status'] = 'A';
+							$val['id_leave'] = $valLeave->id_leave_header;
+							$val['id_shift_group'] = $value->id_new_shift_group;
+							$val['id_timezone'] = $value->id_new_timezone;
+							$val['id_religion'] = $valReligion->id_general_data;
+							$val['id_vaccination_status'] = $fixValVac;
+							$val['id_company'] = $value->id_company_destination;							
+							$val['id_employment_status'] = $value->id_employment_status;
+							$val['nik_employee'] = $nik;
+							$val['created_by'] = $value->created_by;
+
+							try{
+								$emp = Employee::create($val);
+							} catch (\Exception $e) {
+								$idError = $value->id_employee;
+								$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+								$bodyError = ' cannot create new employee ('.$idError.')';
+								\Log::error($titleError.$bodyError);
+					            
+								if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+							    	throw new \Exception($e->getMessage());    
+							    } else {
+							    	throw new \Exception($titleError);    
+							    }
+					        }
+							
+							if($value->id_position_detail != null){	
+								if(!is_null($job_emp->id_employee)){
+									$up_emp_new = JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+											'id_employee2' => $emp->id_employee,
+										));
+								}
+								else{
+									JobPositionDetail::where('id_position_detail', $value->id_position_detail)->update(array(
+										'id_employee' => $emp->id_employee,
+									));
+								}
+								
+								JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->update(array(
+									'id_employee' => null,
+									'secondary_position' => false,
+								));
+								
+							}
+							try{
+								/* Default User */	 	
+								$form_user = array(
+									'user_name' =>  $emp->nik_employee,
+									'password' => Hash::make($emp->nik_employee),
+									'email' => strtolower($emp->private_mail),
+									'default_company' =>  $emp->id_company,
+									'description_name' => $getMu->access_group.' '.$emp->name,
+									'access_group' => $getMu->access_group,
+									'created_by' => session('id_user'),
+								);
+								try{
+									
+									$user = MasterUser::create($form_user);
+								} catch (\Exception $e) {
+									throw new \Exception('NIK or Email Conflict');           
+								}
+								RelationCompanyUser::create(array(
+									'id_user' => $user->id_user,
+									'id_company' => $emp->id_company,
+									'created_by' => session('id_user'),
+								));
+								$data_user = [
+										'code_default' => $getMu->access_group,
+										'id_company' => $emp->id_company,
+									];
+									
+									$mu = CareerTransition::get_default_access($data_user);
+									foreach($mu['menu'] as $key => $val){
+										  $mm = MasterMenu::where('id_menu', $val['id_menu'])->first();
+											$r = Responsibility::where('id_responsibility', $mm->id_responsibility)->first();
+											$form_respon = array(
+												'id_user' => $user->id_user,
+												'id_menu' => $val['id_menu'],
+												'id_responsibility' => $mm->id_responsibility,
+												'id_responsibility_menu' => $r->id_responsibility_menu,
+												'sequence' => $key+1,
+												'description_name' => $val['menu_name'],
+												'start_date' => date("Y-m-d"),
+												'end_date' => null,
+												'can_create' => 1,
+												'can_update' => 1,
+												'can_delete' => 1,
+												'can_print' => 1,
+												'id_company' => $val['id_company'],
+												'created_by' => session('id_user'),		
+											);
+										$mur = MasterUserResponsibility::create($form_respon);
+									}
+									Employee::where('id_employee', $emp->id_employee)->update(array('id_user' =>  $user->id_user));
+								
+							} catch (\Exception $e) {
+								$idError = $emp->id_user;
+								$titleError = 'Error Empoloyee Transition : '.$value->category.'. User '.$idError;
+								$bodyError = ' cannot update [status=A] by id_user ('.$idError.')';
+								\Log::error($titleError.$bodyError);
+					            
+								if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+							    	throw new \Exception($e->getMessage());    
+							    } else {
+							    	throw new \Exception($titleError);    
+							    }
+					        }
+							
+							
+						/*	$req = new Request();
+							$req->id_employee = $emp->id_employee;
+							$req->id_company = $emp->id_company;
+							$this->AttendanceController->generateWorkdaysByEmployee($req);
+						*/
+							DB::select("select * from generateworkdaysnewemployee(?,?,?,?,?)",[$emp->id_employee,$emp->id_company,$emp->join_date,date('Y-m-d'),$emp->created_by]);
+							
+							$generateLock = DB::table(DB::raw("generate_lock_gps_location(".$emp->id_employee.",".$emp->id_company.",'".$emp->join_date."','".date('Y-m-d')."',".$emp->created_by.")"))->select('*')->get();
+						/*	
+							$generateLock = DB::statement("UPDATE hr_work_days hwd
+								SET lock_gps_location = he.lock_gps_location                         
+								FROM hr_employee he
+								WHERE hwd.id_employee = he.id_employee
+									AND hwd.id_company = he.id_company
+									AND hwd.lock_gps_location <> he.lock_gps_location
+									AND	current_dates >= coalesce('".$emp->join_date."',current_date)
+									AND current_dates <= '".$emp->join_date."'::date + 30
+									AND hwd.id_employee = coalesce(".$emp->id_employee.", he.id_employee)
+									AND hwd.id_company = coalesce(".$emp->id_company.", he.id_company)");
+						*/	
+							$emp_doc = Document::where('id_employee', $value->id_employee)->get()->makeHidden(['id_document_employee'])->toArray();						
+							if($emp_doc){
+								$storageimage = \File::copyDirectory(storage_path('app/public/upload/data/'.$empGetUser->nik_employee), storage_path('app/public/upload/data/'.$emp->nik_employee));
+								if(!$storageimage){
+									throw new \Exception('Attachment No Copy (Error)');
+								}
+								foreach($emp_doc as $d=>$doc_val){
+									$doc_val['id_employee'] = $emp->id_employee;
+									$doc_val['id_company'] = $emp->id_company;
+									try{
+										$copy_doc = Document::create($doc_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee document by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_bank = Bank::where('id_employee', $value->id_employee)->get()->makeHidden(['id_bank_employee'])->toArray();
+							if($emp_bank){
+								foreach($emp_bank as $d=>$bank_val){
+									$getBank = DB::select(DB::raw(
+										"SELECT mb.bank_code FROM public.master_bank mb WHERE mb.id_company = ".$empGetUser->id_company." AND mb.id_bank = ".$bank_val['id_bank']
+										) 
+									)[0];
+									$bank_code = $getBank->bank_code;
+									
+									$valBank = DB::select(DB::raw(
+										"SELECT mb.id_bank FROM public.master_bank mb WHERE mb.id_company = ".$value->id_company_destination." 
+										AND mb.bank_code = '".$bank_code."'"
+										) 
+									)[0];
+							
+									$bank_val['id_employee'] = $emp->id_employee;
+									$bank_val['id_bank'] = $valBank->id_bank;
+									$bank_val['id_company'] = $emp->id_company;
+									try{
+										$copy_bank = Bank::create($bank_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee bank by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							$emp_ins = Insurance::where('id_employee', $value->id_employee)->get()->makeHidden(['id_insurance_employee'])->toArray();
+							if($emp_ins){
+								foreach($emp_ins as $d=>$ins_val){
+									$getIns = DB::select(DB::raw(
+										"SELECT mi.insurance_code FROM public.master_insurance mi WHERE mi.id_company = ".$empGetUser->id_company." AND mi.id_insurance = ".$ins_val['id_insurance']
+										) 
+									)[0];
+									$insurance_code = $getIns->insurance_code;
+									
+									$valIns = DB::select(DB::raw(
+										"SELECT mi.id_insurance FROM public.master_insurance mi WHERE mi.id_company = ".$value->id_company_destination." 
+										AND mi.insurance_code = '".$insurance_code."'"
+										) 
+									)[0];
+									
+									$ins_val['id_employee'] = $emp->id_employee;
+									$ins_val['id_insurance'] = $valIns->id_insurance;
+									$ins_val['id_company'] = $emp->id_company;
+									try{
+										$copy_ins = Insurance::create($ins_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee insurance by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_edu = Education::where('id_employee', $value->id_employee)->get()->makeHidden(['id_education_employee'])->toArray();
+							if($emp_edu){
+								foreach($emp_edu as $d=>$edu_val){
+									$getEdu = DB::select( DB::raw(
+										"SELECT mgd.code FROM public.master_general_data mgd WHERE mgd.id_company = ".$empGetUser->id_company." AND mgd.id_general_data = ".$edu_val['id_education_level']
+										) 
+									)[0];
+									$idEdu = $getEdu->code;
+
+									$valEdu = DB::select( DB::raw(
+										"SELECT mgd.id_general_data FROM public.master_general_data mgd WHERE mgd.id_company = ".$value->id_company_destination." 
+										AND mgd.code = '".$idEdu."'"
+										) 
+									)[0];
+						
+									$edu_val['id_employee'] = $emp->id_employee;
+									$edu_val['id_education_level'] = $valEdu->id_general_data;
+									$edu_val['id_company'] = $emp->id_company;
+									try{
+										$copy_edu = Education::create($edu_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee Education by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_fam = Family::where('id_employee', $value->id_employee)->get()->makeHidden(['id_family_employee'])->toArray();
+							if($emp_fam){
+								foreach($emp_fam as $d=>$fam_val){
+									$fam_val['id_employee'] = $emp->id_employee;
+									$fam_val['id_company'] = $emp->id_company;
+									try{
+										$copy_fam = Family::create($fam_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee Family by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+							
+							$emp_ex = Experience::where('id_employee', $value->id_employee)->get()->makeHidden(['id_experience_employee'])->toArray();
+							if($emp_ex){
+								foreach($emp_ex as $d=>$ex_val){
+									$ex_val['id_employee'] = $emp->id_employee;
+									$ex_val['id_company'] = $emp->id_company;
+									try{
+										$copy_ex = Experience::create($ex_val);
+									} catch (\Exception $e) {
+										$idError = $value->id_employee;
+										$titleError = 'Error Empoloyee Transition : '.$value->category.'. Employee '.$idError;
+										$bodyError = ' cannot create employee Experience by id_employee ('.$idError.')';
+										\Log::error($titleError.$bodyError);
+
+										if(session()->has('access_group') && session('access_group') =='Default_Administrator'){
+									    	throw new \Exception($e->getMessage());    
+									    } else {
+									    	throw new \Exception($titleError);    
+									    }
+							        }
+								}
+							}
+						}
+
+						$form_new = array(
+							'id_new_employee' => $emp['id_employee'],
+							'id_old_employee' => $value->id_employee,
+							'id_new_company' => $emp['id_company'],
+							'id_old_company' => $value->id_company,
+							'created_by' => session('id_user'),
+						);
+						
+						/* Generate Duplicate Leave Balance */
+						CareerTransition::genEntityLeave($form_new);
+						
+						/* Send Mail */
+						$this->EmailController->new_account($emp->nik_employee);
+						
+						
+						DB::table('hr_career_transaction')->where('id_career_transaction', $value->id_career_transaction)->update(array(
+							'executed' => 1,
+							'id_new_leave' => $valLeave->id_leave_header,
+							'id_new_religion' => $valReligion->id_general_data,
+							'id_new_employement_status' => $value->id_employment_status,
+						));
+						
+						$join_data = [
+							'id_new_employee' => $emp['id_employee'],
+							'id_career_transaction' => $value->id_career_transaction,
+							'reference_number' => $value->reference_number,
+							'id_new_company' => $emp['id_company'],
+							'created_by' => session('id_user'),
+						];
+						$join_entity = CareerTransition::genEntityJoin($join_data);
+						$kodeEntity = CareerTransition::getkodeEntity($emp['id_company']);
+						$join_entity['reference_number'] = $kodeEntity;
+						CareerTransition::create($join_entity);
+						
+						//======== utk kebutuhan call API HRIS Mobile =======
+						$updateNikMobile[$empGetUser->nik_employee][] = 'inactive'; //terminate
+						// ==================================================
+						DB::commit();
+					}										
+				}
+			/*	if($value->effective_date > date('Y-m-d') && $value->code == 'Approved' && $value->executed == 0 && $value->category != 'Termination'){
+					if($value->id_position_detail != $value->id_old_position_detail){
+						JobPositionDetail::where('id_position_detail', $value->id_old_position_detail)->update(array(
+							'id_employee2' => $value->id_employee,
+						));
+					}					
+				}
+			*/
+			}
+		//	DB::commit();
+			if (env('APP_ENV')=='production'){
+				self::updateNikMobile($updateNikMobile);
+			}
+			return response()->json(['status' => 'true', 'message' => 'Success']);
+		//	\Log::channel('scheduler')->info('Stop Schedule : Employee Transition');
+        } catch (\Exception $e) {
+		//	dd($e->getMessage());
+            DB::rollBack();
+            Log::error($e);
+			return response()->json(['status' => 'false', 'message' => $e->getMessage()]);
+		//	\Log::channel('scheduler')->info('Stop Schedule : Employee Transition');
+        }
+    }
+	
+	public function submit_approve($id) {
+		$id_approval = CareerTransition::where('id_career_transaction', $id)->first();
+		$approve = CareerTransition::submit_approve();
+	//	dd($id_approval);
+			CareerTransition::where('id_career_transaction', $id)->update(array(
+				'id_approval_status' => $approve->id_general_data,
+			));	
+			
+		$data = [
+            'id_career_transaction' => $id,
+            'id_approval' => $id_approval->id_approval
+			];
+		$data_status = CareerTransition::getdata_approval_status($data);
+		foreach ($data_status as $key => $value) {
+			if($value->code == "New" || $value->code == "Cancel"){
+					if(count($data_status) == 1 && $value->id_user == session('id_user')){
+						$approved = CareerTransition::approved();
+						ApprovalTransaction::where('id_source_transaction', $id)->where('source_transaction_type', 'Career_Request')->update(array(
+							'id_approval_status' => $approved->id_general_data,
+							'update_date' => date('Y-m-d H:i:s'),
+							'updated_by' => session('id_user'),
+						));	
+						CareerTransition::where('id_career_transaction', $id)->update(array(
+							'id_approval_status' => $approved->id_general_data,			
+						));
+					}
+					else{
+						ApprovalTransaction::where('id_source_transaction', $id)->where('source_transaction_type', 'Career_Request')->update(array(
+							'id_approval_status' => $approve->id_general_data,
+						));	
+					}				
+			}
+		}	
+        return response()->json(['status' => 'true', 'message' => 'Approval Status Submit Successfully !!']);
+    }
+	public function cancel($id) {
+		$cancel = CareerTransition::cancel();
+        CareerTransition::where('id_career_transaction', $id)->update(array(
+				'id_approval_status' => $cancel->id_general_data,
+			));
+		 ApprovalTransaction::where('id_source_transaction', $id)->where('source_transaction_type', 'Career_Request')->update(array(
+					'id_approval_status' => $cancel->id_general_data,
+				));	
+    }
+	public function edit($id) {
+        if (request()->ajax()) {
+            $data = CareerTransition::findOrFail($id);
+            return response()->json(['result' => $data]);
+        }
+    }
+	public function get_career_edit(Request $request) {
+        $data = [
+            'id_career_transaction' => $request->id_career_transaction
+        ];
+        $result = CareerTransition::get_career_edit($data);
+	//	dd($result);
+        return response()->json($result);
+    }
+	
+	 public function destroy($id) {
+        $data = CareerTransition::findOrFail($id);
+		ApprovalTransaction::where('id_source_transaction', $id)->where('source_transaction_type', 'Career_Request')->delete();
+        $data->delete();
+    }
+	
+	public function get_employee(Request $request) {
+		$data = [
+            'rehire' => $request->rehire
+        ];
+		$data_access = Employee::get_access($request->id_url);
+		if($data_access != null){
+			foreach($data_access as $value){
+				$x[] = $value->id_branch;
+			}
+			$group_branch = implode(",", $x);
+		}
+		else{
+			$group_branch = null;
+		}
+        $result = CareerTransition::get_employee($data,$group_branch);
+        return response()->json($result);
+    }
+	
+	public function get_position(Request $request) {
+        $data = [
+            'id_employee' => $request->id_employee
+        ];	
+        $result = CareerTransition::get_position($data);
+	//	dd($result);
+        return response()->json($result);
+    }
+	
+	public function get_position_detail(Request $request) {
+        $data = [
+         //   'id_employee' => $request->id_employee,
+            'id_position_detail' => $request->id_position_detail,
+        ];	
+        $result = CareerTransition::get_position_detail($data);
+	//	dd($result);
+        return response()->json($result);
+    }
+		
+	public function get_career_category(Request $request) {
+        $result = CareerTransition::get_career_category();
+        return response()->json($result);
+    }
+	public function get_employment_status(Request $request) {
+        $result = CareerTransition::get_employment_status($request->id);
+        return response()->json($result);
+    }
+	
+	public function get_career_type(Request $request) {
+        $data = [
+            'id' => $request->id,
+            'var_type' => $request->var_type,
+        ];	
+	//	dd($data);
+        $result = CareerTransition::get_career_type($data);
+        return response()->json($result);
+    }
+	public function get_company_session(Request $request) {
+        $data = [
+            'id' => session('id_company')
+        ];	
+        $result = CareerTransition::get_company_session($data);
+        return response()->json($result);
+    }
+
+    public function get_company(Request $request) {
+		$data = [
+            'type' => $request->type
+        ];
+        $result = CareerTransition::get_company($data);
+	//	dd($result);
+        return response()->json($result);
+    }
+	
+	public function get_hierachy(Request $request) {
+		$data_emp = [
+            'emp' => $request->emp
+        ];
+		$req = ApprovalTransaction::get_career_req($data_emp);
+		$req_location = $req[0]->id_location;
+		$data = [
+            'code' => $request->code
+        ];
+        $result = ApprovalTransaction::get_hierachy_custom($data,$req_location);
+	//	dd($result);
+        return response()->json($result);
+    }
+	
+	public function get_approval_status() {		
+        $result = CareerTransition::get_approval_status();
+	//	dd($result);
+        return response()->json($result);
+    }
+	public function get_terminate_reason(Request $request) {
+		$data = [
+            'code' => $request->code
+        ];
+	//	dd($data);
+        $result = CareerTransition::get_terminate_reason($data);
+	//	dd($result);
+        return response()->json($result);
+    }
+	public function browse_job(Request $request) {
+		if ($request->ajax()) {
+			 $data = [
+				'company' => $request->company
+			];	
+			$result = CareerTransition::browse_job($data);
+		 }
+        return response()->json($result);
+    }
+	
+	public function browse_reco(Request $request) {
+		if ($request->ajax()) {
+			$emp = Employee::where('id_employee',$request->id_employee)->first();
+			 $data = [
+				'nik_employee' => $emp->nik_employee,
+				'cat' => $request->cat,
+			];	
+			$result = CareerTransition::browse_reco($data);
+		 }
+        return response()->json($result);
+    }
+	public function checkpos(Request $request){
+		if ($request->ajax()) {
+			$data = [
+				'jobid' => $request->jobid,
+				'company' => $request->company,
+			];
+			$result = CareerTransition::browse_check($data);
+		 }
+       return response()->json(['result' => $result]);
+	}
+	
+	public function checkreco(Request $request){
+		if ($request->ajax()) {
+			$data = [
+				'recoid' => $request->recoid,
+			];
+			$result = CareerTransition::reco_check($data);
+		 }
+       return response()->json(['result' => $result]);
+	}
+	
+	public function browse(Request $request) {
+        if ($request->ajax()) {
+			$data = [
+				'career' => $request->career
+			];	
+			if($data['career'] == "Orientation" || $data['career'] == "Failed_Orientation" || $data['career'] == "Temporary_Assignment" || $data['career'] == "Pass_RPK"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/memo/apimemo';
+			}
+			else if($data['career'] == "Employment_Status_Changes"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/contract/apicontract?contract=pkwtt';
+			}
+			else if($data['career'] == "New_Employee"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/contract/apicontract?contract=pkwt';
+			}
+			else if($data['career'] == "Promotion" || $data['career'] == "Pass_Orientation" || $data['career'] == "Mutation" || $data['career'] == "Demotion"|| $data['career'] == "Rotation" || $data['career'] == "Relocation"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/career/apicareer?career='.$data['career'];
+			}
+			else{
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/career/apinocareer';				
+			}
+			$response = file_get_contents($url);
+			$decode = json_decode($response);
+			$result = collect($decode);
+            echo $result;
+        }
+    }
+
+    public function checkid(Request $request) {
+		if ($request->ajax()) {
+			$data = [
+				'id' => $request->careerid,
+				'career' => $request->career
+			];
+		//	dd($data['id']);
+			if($data['career'] == "Orientation" || $data['career'] == "Failed_Orientation" || $data['career'] == "Temporary_Assignment" || $data['career'] == "Pass_RPK"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/memo/apimemoid?id='.$data['id'];
+			}
+			else if($data['career'] == "Employment_Status_Changes"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/contract/apicontractid?contract=pkwtt&id='.$data['id'];
+			}
+			else if($data['career'] == "New_Employee"){
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/contract/apicontractid?contract=pkwt&id='.$data['id'];
+			}
+			else{
+				$url = 'https://hris.borwita.co.id/nosurat/index.php/career/apicareerid?careerid='.$data['id'];
+			}
+			$response = file_get_contents($url);			
+			$result = json_decode($response);
+		 }
+        return response()->json(['result' => $result]);
+    }
+
+    public function updateNikMobile($data=null) {
+		if(is_array($data) && count($data) > 0){
+            \Log::channel('scheduler')->info('There are '.count($data).' data users to update to Mobile Api');
+
+			foreach ($data as $k => $val) {
+				if(count($val)==1 && in_array('inactive', $val)){ //kondisi : ['inactive']
+					$dataApiIsActiveUser = ['nik'=>$k, 'is_active'=>false];
+					$callApiIsActiveUser = Http::withBasicAuth($this->usernameApiIsActiveUser, $this->passwordApiIsActiveUser)
+					    ->withHeaders(['Content-Type' => 'application/json'])
+					    ->put($this->urlApiIsActiveUser, $dataApiIsActiveUser);
+
+                	\Log::channel('scheduler')->info('Inactive User: '.json_encode($dataApiIsActiveUser).'. Url: '.$this->urlApiIsActiveUser.'. Response: '.$callApiIsActiveUser->body());
+				}
+
+				if(count($val)==1 && in_array('active', $val)){ //kondisi : ['active']
+					$dataApiIsActiveUser = ['nik'=>$k, 'is_active'=>true];
+					$callApiIsActiveUser = Http::withBasicAuth($this->usernameApiIsActiveUser, $this->passwordApiIsActiveUser)
+					    ->withHeaders(['Content-Type' => 'application/json'])
+					    ->put($this->urlApiIsActiveUser, $dataApiIsActiveUser);
+
+                	\Log::channel('scheduler')->info('Active User: '.json_encode($dataApiIsActiveUser).'. Url: '.$this->urlApiIsActiveUser.'. Response: '.$callApiIsActiveUser->body());
+				}
+
+				if(count($val)==1 && (!in_array('inactive',$val) && !in_array('active',$val))){ 
+					//kondisi : ['BCP0008746'] -> rehire dan ganti NIK
+					$dataApiUpdateNikUser = ['nik_old'=>$k, 'nik_new'=>@$val[0]];
+					$callApiUpdateNikUser = Http::withBasicAuth($this->usernameApiUpdateNikUser, $this->passwordApiUpdateNikUser)
+				    ->withHeaders(['Content-Type' => 'application/json'])
+				    ->put($this->urlApiUpdateNikUser, $dataApiUpdateNikUser);
+
+                    \Log::channel('scheduler')->info('Change User: '.json_encode($dataApiUpdateNikUser).'. Url: '.$this->urlApiUpdateNikUser.'. Response: '.$callApiUpdateNikUser->body());
+
+                    $dataApiIsActiveUser = ['nik'=>@$val[0], 'is_active'=>true];
+					$callApiIsActiveUser = Http::withBasicAuth($this->usernameApiIsActiveUser, $this->passwordApiIsActiveUser)
+					    ->withHeaders(['Content-Type' => 'application/json'])
+					    ->put($this->urlApiIsActiveUser, $dataApiIsActiveUser);
+
+                	\Log::channel('scheduler')->info('Active User after change nik: '.json_encode($dataApiIsActiveUser).'. Url: '.$this->urlApiIsActiveUser.'. Response: '.$callApiIsActiveUser->body());
+				}
+			}
+		}
+		return true;
+    }
+	
+	public function get_shift(Request $request) {
+        $result = CareerTransition::get_shift($request->id);
+        return response()->json($result);
+    }
+	
+	public function get_timezone(Request $request) {
+        $result = CareerTransition::get_timezone($request->id);
+        return response()->json($result);
+    }
+}
